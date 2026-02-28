@@ -8,11 +8,11 @@ bot = telebot.TeleBot(TOKEN)
 
 app = Flask(__name__)
 
-# -------------------- تنظیمات امنیتی --------------------
+# ================= امنیت =================
 
-ALLOWED_USERS = [8052203674]  # ادمین‌ها (اگر خواستی بیشتر اضافه کن)
+ALLOWED_USERS = [8052203674]  # ادمین‌ها
 
-# -------------------- دیتابیس --------------------
+# ================= دیتابیس =================
 
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -27,14 +27,14 @@ CREATE TABLE IF NOT EXISTS students (
 """)
 conn.commit()
 
-# -------------------- مسیر تست سرور --------------------
+# ================= مسیر تست =================
 
 
 @app.route('/', methods=['GET'])
 def home():
     return "Bot is running!"
 
-# -------------------- وبهوک تلگرام --------------------
+# ================= وبهوک =================
 
 
 @app.route(f'/{TOKEN}', methods=['POST'])
@@ -44,7 +44,7 @@ def webhook():
     bot.process_new_updates([update])
     return "OK", 200
 
-# -------------------- دستورات ربات --------------------
+# ================= دستورات عمومی =================
 
 
 @bot.message_handler(commands=['start'])
@@ -71,19 +71,16 @@ def get_student_id(message, name):
     student_id = message.text.strip()
     telegram_id = message.from_user.id
 
-    try:
-        cursor.execute(
-            "INSERT OR REPLACE INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)",
-            (telegram_id, name, student_id)
-        )
-        conn.commit()
+    cursor.execute(
+        "INSERT OR REPLACE INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)",
+        (telegram_id, name, student_id)
+    )
+    conn.commit()
 
-        bot.send_message(
-            message.chat.id,
-            "✅ ثبت شد.\nبرای دیدن نمره دستور /score رو بزن."
-        )
-    except:
-        bot.send_message(message.chat.id, "❌ خطا در ثبت اطلاعات.")
+    bot.send_message(
+        message.chat.id,
+        "✅ ثبت شد.\nبرای دیدن نمره دستور /score رو بزن."
+    )
 
 
 @bot.message_handler(commands=['score'])
@@ -106,11 +103,12 @@ def score(message):
             "❌ هنوز نمره‌ای ثبت نشده."
         )
 
+# ================= پنل ادمین =================
+
 
 @bot.message_handler(commands=['setscore'])
 def set_score(message):
 
-    # امنیت: فقط ادمین‌ها
     if message.from_user.id not in ALLOWED_USERS:
         bot.send_message(message.chat.id, "⛔ دسترسی غیرمجاز.")
         return
@@ -118,7 +116,6 @@ def set_score(message):
     try:
         _, student_id, score = message.text.split()
 
-        # پیدا کردن دانشجو
         cursor.execute(
             "SELECT telegram_id FROM students WHERE student_id = ?",
             (student_id,)
@@ -134,7 +131,6 @@ def set_score(message):
             )
             conn.commit()
 
-            # ارسال خودکار به دانشجو
             bot.send_message(
                 telegram_id,
                 f"📢 نمره جدید ثبت شد!\n\n📊 نمره شما: {score}"
@@ -156,7 +152,75 @@ def set_score(message):
             "فرمت درست:\n/setscore شماره_دانشجویی نمره"
         )
 
-# -------------------- اجرای سرور --------------------
+
+@bot.message_handler(commands=['list'])
+def list_students(message):
+
+    if message.from_user.id not in ALLOWED_USERS:
+        bot.send_message(message.chat.id, "⛔ دسترسی غیرمجاز.")
+        return
+
+    cursor.execute("SELECT name, student_id, score FROM students")
+    students = cursor.fetchall()
+
+    if not students:
+        bot.send_message(message.chat.id, "لیستی وجود ندارد.")
+        return
+
+    text = "📋 لیست دانشجویان:\n\n"
+
+    for s in students:
+        name = s[0]
+        sid = s[1]
+        score = s[2] if s[2] else "—"
+        text += f"👤 {name} | {sid} | نمره: {score}\n"
+
+    bot.send_message(message.chat.id, text)
+
+
+@bot.message_handler(commands=['delete'])
+def delete_student(message):
+
+    if message.from_user.id not in ALLOWED_USERS:
+        bot.send_message(message.chat.id, "⛔ دسترسی غیرمجاز.")
+        return
+
+    try:
+        _, student_id = message.text.split()
+
+        cursor.execute(
+            "DELETE FROM students WHERE student_id = ?", (student_id,))
+        conn.commit()
+
+        bot.send_message(message.chat.id, "✅ دانشجو حذف شد.")
+
+    except:
+        bot.send_message(message.chat.id, "فرمت درست:\n/delete شماره_دانشجویی")
+
+
+@bot.message_handler(commands=['add'])
+def add_student(message):
+
+    if message.from_user.id not in ALLOWED_USERS:
+        bot.send_message(message.chat.id, "⛔ دسترسی غیرمجاز.")
+        return
+
+    try:
+        _, student_id, name = message.text.split(maxsplit=2)
+
+        cursor.execute(
+            "INSERT INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)",
+            (0, name, student_id)
+        )
+        conn.commit()
+
+        bot.send_message(message.chat.id, "✅ دانشجو اضافه شد.")
+
+    except:
+        bot.send_message(
+            message.chat.id, "فرمت درست:\n/add شماره_دانشجویی نام")
+
+# ================= اجرای سرور =================
 
 
 if __name__ == "__main__":
