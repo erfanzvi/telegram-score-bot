@@ -1,10 +1,14 @@
 import sqlite3
 import telebot
 import os
+from flask import Flask, request
 
 TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
+app = Flask(__name__)
+
+# دیتابیس
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -19,6 +23,19 @@ CREATE TABLE IF NOT EXISTS students (
 conn.commit()
 
 ADMIN_ID = 8052203674
+
+
+@app.route('/', methods=['GET'])
+def home():
+    return "Bot is running!"
+
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "OK", 200
 
 
 @bot.message_handler(commands=['start'])
@@ -87,5 +104,8 @@ def set_score(message):
             message.chat.id, "فرمت درست:\n/setscore شماره_دانشجویی نمره")
 
 
-print("Bot is running...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.set_webhook(
+        url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
