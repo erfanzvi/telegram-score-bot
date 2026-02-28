@@ -2,7 +2,7 @@ import sqlite3
 import telebot
 import os
 from flask import Flask, request
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
@@ -59,7 +59,7 @@ def admin_keyboard():
 
 def student_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(KeyboardButton("/register"), KeyboardButton("/score"))
+    kb.row(KeyboardButton("register"), KeyboardButton("score"))
     return kb
 
 # ================= دستورات عمومی =================
@@ -75,7 +75,7 @@ def start(message):
         bot.send_message(
             message.chat.id,
             "سلام\nبه ربات نمره‌دهی ورودی بهمن 1403 پزشکی گیلان خوش آمدید.\n\n"
-            "دانشجوی گرامی جهت ثبت اطلاعات خود از /register استفاده کنید.\n"
+            "دانشجوی گرامی جهت ثبت اطلاعات خود دکمه register را بزنید.\n"
             "دقت کنید که نام و نام خانوادگی خود را به زبان فارسی و در مرحله بعد شماره دانشجویی را با اعداد انگلیسی وارد کنید.\n"
             "لطفا دقت شود که هر فرد می‌تواند یک شماره دانشجویی ثبت نماید.",
             reply_markup=student_keyboard()
@@ -84,7 +84,7 @@ def start(message):
 # ================= ثبت دانشجو =================
 
 
-@bot.message_handler(commands=['register'])
+@bot.message_handler(func=lambda m: m.text.lower() == "register")
 def register(message):
     telegram_id = message.from_user.id
     cursor.execute(
@@ -118,12 +118,12 @@ def get_student_id(message, name):
     conn.commit()
     bot.send_message(
         message.chat.id,
-        "اطلاعات شما ثبت شد.✅️\nبرای دیدن نمرات خود از دستور /score استفاده کنید",
+        "اطلاعات شما ثبت شد.✅️\nبرای دیدن نمرات خود دکمه score را بزنید.",
         reply_markup=student_keyboard()
     )
 
 
-@bot.message_handler(commands=['score'])
+@bot.message_handler(func=lambda m: m.text.lower() == "score")
 def score(message):
     telegram_id = message.from_user.id
     cursor.execute(
