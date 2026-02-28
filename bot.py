@@ -16,7 +16,7 @@ cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS students (
-    telegram_id INTEGER PRIMARY KEY,
+    telegram_id INTEGER UNIQUE,
     name TEXT,
     student_id TEXT UNIQUE
 )
@@ -32,9 +32,12 @@ CREATE TABLE IF NOT EXISTS grades (
 conn.commit()
 
 # ================= وبهوک =================
+
+
 @app.route('/', methods=['GET'])
 def home():
     return "Bot is running!"
+
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -44,47 +47,76 @@ def webhook():
     return "OK", 200
 
 # ================= دستورات عمومی =================
+
+
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.send_message(
         message.chat.id,
-        "سلام 👋\nبرای ثبت اطلاعات دستور /register رو بزن."
+        "سلام\nبه ربات نمره‌دهی ورودی بهمن 1403 پزشکی گیلان خوش آمدید.\n\n"
+        "دانشجوی گرامی جهت ثبت اطلاعات خود از /register استفاده کنید.\n"
+        "دقت کنید که نام و نام خانوادگی خود را به زبان فارسی و در مرحله بعد شماره دانشجویی را با اعداد انگلیسی وارد کنید.\n"
+        "لطفا دقت شود که هر فرد می‌تواند یک شماره دانشجویی ثبت نماید."
     )
+
 
 @bot.message_handler(commands=['register'])
 def register(message):
-    msg = bot.send_message(message.chat.id, "اسم خودت رو وارد کن:")
+    telegram_id = message.from_user.id
+    cursor.execute(
+        "SELECT * FROM students WHERE telegram_id = ?", (telegram_id,))
+    if cursor.fetchone():
+        bot.send_message(
+            message.chat.id, "❌ شما مجاز به ثبت بیش از یک شماره دانشجویی نیستید.")
+        return
+    msg = bot.send_message(
+        message.chat.id, "لطفا نام و نام خانوادگی خودت را به زبان فارسی وارد کنید:")
     bot.register_next_step_handler(msg, get_name)
+
 
 def get_name(message):
     name = message.text.strip()
-    msg = bot.send_message(message.chat.id, "شماره دانشجویی رو وارد کن:")
+    msg = bot.send_message(
+        message.chat.id, "لطفا شماره دانشجویی خود را با اعداد انگلیسی وارد کنید:")
     bot.register_next_step_handler(msg, get_student_id, name)
+
 
 def get_student_id(message, name):
     student_id = message.text.strip()
     telegram_id = message.from_user.id
+
+    # بررسی شماره دانشجویی تکراری
     cursor.execute(
-        "INSERT OR REPLACE INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)",
+        "SELECT * FROM students WHERE student_id = ?", (student_id,))
+    if cursor.fetchone():
+        bot.send_message(message.chat.id, "❌ شماره دانشجویی تکراری است.")
+        return
+
+    cursor.execute(
+        "INSERT INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)",
         (telegram_id, name, student_id)
     )
     conn.commit()
+
     bot.send_message(
         message.chat.id,
-        "✅ ثبت شد.\nبرای دیدن نمره دستور /score رو بزن."
+        "اطلاعات شما ثبت شد.✅️\nبرای دیدن نمرات خود از دستور /score استفاده کنید"
     )
+
 
 @bot.message_handler(commands=['score'])
 def score(message):
     telegram_id = message.from_user.id
-    cursor.execute("SELECT student_id FROM students WHERE telegram_id = ?", (telegram_id,))
+    cursor.execute(
+        "SELECT student_id FROM students WHERE telegram_id = ?", (telegram_id,))
     res = cursor.fetchone()
     if not res:
         bot.send_message(message.chat.id, "❌ هنوز ثبت‌نام نکردید.")
         return
 
     student_id = res[0]
-    cursor.execute("SELECT course, score FROM grades WHERE student_id = ?", (student_id,))
+    cursor.execute(
+        "SELECT course, score FROM grades WHERE student_id = ?", (student_id,))
     rows = cursor.fetchall()
     if not rows:
         bot.send_message(message.chat.id, "❌ هنوز نمره‌ای ثبت نشده.")
@@ -96,30 +128,50 @@ def score(message):
     bot.send_message(message.chat.id, text)
 
 # ================= پنل ادمین =================
+
+
 @bot.message_handler(commands=['setscore'])
 def set_score(message):
     if message.from_user.id not in ALLOWED_USERS:
         bot.send_message(message.chat.id, "⛔ دسترسی غیرمجاز.")
         return
     try:
-        _, student_id, course, score = message.text.split(maxsplit=3)
-        cursor.execute("""
-            INSERT OR REPLACE INTO grades (student_id, course, score)
-            VALUES (?, ?, ?)
-        """, (student_id, course, score))
+        parts = message.text.split()
+        student_id = parts[1]
+        # اگر چند درس همزمان ثبت شد
+        grades_list = parts[2:]  # هر درس و نمره به صورت جفت
+        if len(grades_list) % 2 != 0:
+            bot.send_message(
+                message.chat.id, "فرمت درست:\n/setscore شماره_دانشجویی درس1 نمره1 درس2 نمره2 ...")
+            return
+
+        for i in range(0, len(grades_list), 2):
+            course = grades_list[i]
+            score = grades_list[i+1]
+            cursor.execute("""
+                INSERT OR REPLACE INTO grades (student_id, course, score)
+                VALUES (?, ?, ?)
+            """, (student_id, course, score))
         conn.commit()
 
-        cursor.execute("SELECT telegram_id FROM students WHERE student_id = ?", (student_id,))
+        # ارسال پیام به دانشجو
+        cursor.execute(
+            "SELECT telegram_id FROM students WHERE student_id = ?", (student_id,))
         user = cursor.fetchone()
         if user:
             telegram_id = user[0]
-            bot.send_message(
-                telegram_id,
-                f"📢 نمره جدید ثبت شد!\nدرس: {course}\n📊 نمره شما: {score}"
-            )
-        bot.send_message(message.chat.id, "✅ نمره ثبت شد و برای دانشجو ارسال شد.")
+            text = "📢 نمره جدید ثبت شد:\n"
+            for i in range(0, len(grades_list), 2):
+                text += f"{grades_list[i]}: {grades_list[i+1]}\n"
+            bot.send_message(telegram_id, text)
+
+        bot.send_message(
+            message.chat.id, "✅ نمرات ثبت شد و برای دانشجو ارسال شد.")
+
     except:
-        bot.send_message(message.chat.id, "فرمت درست:\n/setscore شماره_دانشجویی درس نمره")
+        bot.send_message(
+            message.chat.id, "فرمت درست:\n/setscore شماره_دانشجویی درس1 نمره1 درس2 نمره2 ...")
+
 
 @bot.message_handler(commands=['list'])
 def list_students(message):
@@ -133,11 +185,14 @@ def list_students(message):
         return
     text = "📋 لیست دانشجویان:\n\n"
     for name, sid in students:
-        cursor.execute("SELECT course, score FROM grades WHERE student_id = ?", (sid,))
+        cursor.execute(
+            "SELECT course, score FROM grades WHERE student_id = ?", (sid,))
         grades = cursor.fetchall()
-        grades_text = ", ".join([f"{c}:{s}" for c, s in grades]) if grades else "—"
+        grades_text = ", ".join(
+            [f"{c}:{s}" for c, s in grades]) if grades else "—"
         text += f"👤 {name} | {sid} | نمرات: {grades_text}\n"
     bot.send_message(message.chat.id, text)
+
 
 @bot.message_handler(commands=['delete'])
 def delete_student(message):
@@ -146,12 +201,15 @@ def delete_student(message):
         return
     try:
         _, student_id = message.text.split()
-        cursor.execute("DELETE FROM students WHERE student_id = ?", (student_id,))
-        cursor.execute("DELETE FROM grades WHERE student_id = ?", (student_id,))
+        cursor.execute(
+            "DELETE FROM students WHERE student_id = ?", (student_id,))
+        cursor.execute(
+            "DELETE FROM grades WHERE student_id = ?", (student_id,))
         conn.commit()
         bot.send_message(message.chat.id, "✅ دانشجو حذف شد.")
     except:
         bot.send_message(message.chat.id, "فرمت درست:\n/delete شماره_دانشجویی")
+
 
 @bot.message_handler(commands=['add'])
 def add_student(message):
@@ -160,14 +218,18 @@ def add_student(message):
         return
     try:
         _, student_id, name = message.text.split(maxsplit=2)
-        cursor.execute("INSERT INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)", (0, name, student_id))
+        cursor.execute(
+            "INSERT INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)", (0, name, student_id))
         conn.commit()
         bot.send_message(message.chat.id, "✅ دانشجو اضافه شد.")
     except:
-        bot.send_message(message.chat.id, "فرمت درست:\n/add شماره_دانشجویی نام")
+        bot.send_message(
+            message.chat.id, "فرمت درست:\n/add شماره_دانشجویی نام")
+
 
 # ================= اجرای سرور =================
 if __name__ == "__main__":
     bot.remove_webhook()
-    bot.set_webhook(url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}")
+    bot.set_webhook(
+        url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
