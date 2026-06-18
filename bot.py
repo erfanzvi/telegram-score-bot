@@ -8,10 +8,9 @@ TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# ================= امنیت =================
-ALLOWED_USERS = [8052203674]  # آیدی ادمین‌ها
+ALLOWED_USERS = [8052203674]
 
-# ================= دیتابیس =================
+# ================= DB =================
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -22,17 +21,353 @@ CREATE TABLE IF NOT EXISTS students (
     student_id TEXT UNIQUE
 )
 """)
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS grades (
     student_id TEXT,
     course TEXT,
-    score TEXT,
+    score REAL,
     PRIMARY KEY(student_id, course)
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS pending_grades (
+    student_id TEXT,
+    course TEXT,
+    score REAL
+)
+""")
+
 conn.commit()
 
-# ================= وبهوک =================
+# ================= TEMP STATES =================
+user_state = {}
+
+# ================= KEYBOARDS =================
+
+
+def admin_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("📊 ثبت نمره"))
+    kb.row(KeyboardButton("🗑 حذف دانشجو"), KeyboardButton("📋 لیست دانشجوها"))
+    kb.row(KeyboardButton("🔄 تطبیق نمرات"))
+    return kb
+
+
+def student_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("register"), KeyboardButton("score"))
+    return kb
+
+# ================= START =================
+
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    uid = message.from_user.id
+    if uid in ALLOWED_USERS:
+        bot.send_message(message.chat.id, "سلام ادمین 👋",
+                         reply_markup=admin_keyboard())
+    else:
+        bot.send_message(message.chat.id,
+                         "سلام\nبه ربات نمره‌دهی ورودی بهمن 1403 پزشکی گیلان خوش آمدید.\n"
+                         "برای ثبت اطلاعات روی register بزنید.",
+                         reply_markup=student_keyboard()
+                         )
+
+# ================= REGISTER FLOW =================
+
+
+@bot.message_handler(func=lambda m: m.text == "register")
+def register(message):
+    uid = message.from_user.id
+
+    cursor.execute("SELECT * FROM students WHERE telegram_id=?", (uid,))
+    if cursor.fetchone():
+        bot.send_message(message.chat.id, "❌ شما قبلاً ثبت‌نام کرده‌اید.")
+        return
+
+    user_state[uid] = {"step": "name"}
+
+    bot.send_message(message.chat.id,
+                     "لطفا نام و نام خانوادگی خودت را به زبان فارسی وارد کنید:")
+
+
+@bot.message_handler(func=lambda m: True)
+def state_router(message):
+    uid = message.from_user.id
+    text = message.text.strip()
+
+    if uid not in user_state:
+        return
+
+    state = user_state[uid]
+
+    # جلوگیری از دستور وسط فرم
+    if text.startswith("/"):
+        bot.send_message(message.chat.id, "❌ ابتدا ثبت‌نام را کامل کنید.")
+        return
+
+    # NAME
+    if state["step"] == "name":
+        if not all('\u0600' <= c <= '\u06FF' or c == ' ' for c in text):
+            bot.send_message(message.chat.id, "❌ فقط نام فارسی وارد کنید")
+            return
+
+        if len(text.split()) < 2:
+            bot.send_message(message.chat.id, "❌ نام و نام خانوادگی وارد کنید")
+            return
+
+        state["name"] = text
+        state["step"] = "sid"
+
+        bot.send_message(message.chat.id,
+                         "لطفا شماره دانشجویی خود را با اعداد انگلیسی وارد کنید:")
+
+    # STUDENT ID
+    elif state["step"] == "sid":
+        if not text.isdigit():
+            bot.send_message(message.chat.id, "❌ فقط عدد انگلیسی وارد کنید")
+            return
+
+        cursor.execute("SELECT * FROM students WHERE student_id=?", (text,))
+        if cursor.fetchone():
+            bot.send_message(message.chat.id, "❌ شماره دانشجویی تکراری است.")
+            user_state.pop(uid, None)
+            return
+
+        cursor.execute("INSERT INTO students VALUES (?, ?, ?)",
+                       (uid, state["name"], text))
+        conn.commit()
+
+        user_state.pop(uid, None)
+
+        bot.send_message(message.chat.id,
+                         "اطلاعات شما ثبت شد.✅️",
+                         reply_markup=student_keyboard()
+                         )
+
+# ================= SCORE =================
+
+
+@bot.message_handler(func=lambda m: m.text == "score")
+def score(message):
+    uid = message.from_user.id
+
+    cursor.execute(
+        "SELECT student_id FROM students WHERE telegram_id=?", (uid,))
+    res = cursor.fetchone()
+    if not res:
+        bot.send_message(message.chat.id, "❌ ثبت‌نام نکرده‌اید")
+        return
+
+    sid = res[0]
+
+    cursor.execute(
+        "SELECT course, score FROM grades WHERE student_id=?", (sid,))
+    rows = cursor.fetchall()
+
+    if not rows:
+        bot.send_message(message.chat.id, "❌ نمره‌ای ثبت نشده")
+        return
+
+    txt = "📊 نمرات شما:\n"
+    for c, s in rows:
+        txt += f"{c}: {s}\n"
+
+    bot.send_message(message.chat.id, txt)
+
+# ================= ADMIN ACTION =================
+
+
+@bot.message_handler(func=lambda m: m.from_user.id in ALLOWED_USERS and m.text in [
+    "📊 ثبت نمره", "🗑 حذف دانشجو", "📋 لیست دانشجوها", "🔄 تطبیق نمرات"
+])
+def admin_actions(message):
+
+    if message.text == "📊 ثبت نمره":
+        msg = bot.send_message(message.chat.id,
+                               "فرمت:\n"
+                               "40123456 [درس] 19 [درس2] 18.5\n\n"
+                               "یا چند دانشجو در چند خط")
+        bot.register_next_step_handler(msg, set_scores)
+
+    elif message.text == "📋 لیست دانشجوها":
+        send_list(message)
+
+    elif message.text == "🗑 حذف دانشجو":
+        msg = bot.send_message(message.chat.id, "شماره دانشجویی را وارد کنید:")
+        bot.register_next_step_handler(msg, delete_student)
+
+    elif message.text == "🔄 تطبیق نمرات":
+        sync_pending(message)
+
+# ================= PARSER =================
+
+
+def parse_line(line):
+    parts = line.split()
+    sid = parts[0]
+    data = parts[1:]
+
+    results = []
+    i = 0
+
+    while i < len(data):
+        course = data[i]
+        score = data[i+1]
+
+        # اگر درس با [ ] نبود، چندکلمه‌ای در نظر بگیر
+        if course.startswith("["):
+            course_name = course[1:]
+            while not data[i].endswith("]"):
+                i += 1
+                course_name += " " + data[i]
+            course_name = course_name[:-1]
+        else:
+            course_name = course
+
+        try:
+            score_val = float(score)
+        except:
+            i += 2
+            continue
+
+        if 0 <= score_val <= 20:
+            results.append((sid, course_name, score_val))
+
+        i += 2
+
+    return results
+
+# ================= SET SCORES =================
+
+
+def set_scores(message):
+    lines = message.text.strip().split("\n")
+
+    success = []
+    fail = []
+
+    for line in lines:
+        try:
+            parsed = parse_line(line)
+
+            if not parsed:
+                continue
+
+            sid = parsed[0][0]
+
+            cursor.execute(
+                "SELECT telegram_id FROM students WHERE student_id=?", (sid,))
+            user = cursor.fetchone()
+
+            for sid, course, score in parsed:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO grades VALUES (?, ?, ?)
+                """, (sid, course, score))
+
+            conn.commit()
+
+            if user:
+                tid = user[0]
+                txt = "📢 نمره جدید ثبت شد:\n"
+                for _, c, s in parsed:
+                    txt += f"{c}: {s}\n"
+                bot.send_message(tid, txt)
+                success.append(sid)
+            else:
+                fail.append(sid)
+                for _, c, s in parsed:
+                    cursor.execute("INSERT INTO pending_grades VALUES (?, ?, ?)",
+                                   (sid, c, s))
+                conn.commit()
+
+        except:
+            continue
+
+    bot.send_message(message.chat.id,
+                     f"✅ ثبت شد:\n{success}\n\n❌ ثبت‌نام نکرده:\n{fail}")
+
+# ================= SYNC =================
+
+
+def sync_pending(message):
+    cursor.execute("SELECT DISTINCT student_id FROM pending_grades")
+    rows = cursor.fetchall()
+
+    done = []
+    still = []
+
+    for (sid,) in rows:
+        cursor.execute(
+            "SELECT telegram_id FROM students WHERE student_id=?", (sid,))
+        user = cursor.fetchone()
+
+        cursor.execute(
+            "SELECT course, score FROM pending_grades WHERE student_id=?", (sid,))
+        grades = cursor.fetchall()
+
+        if user:
+            tid = user[0]
+
+            for c, s in grades:
+                cursor.execute("INSERT OR REPLACE INTO grades VALUES (?, ?, ?)",
+                               (sid, c, s))
+
+            cursor.execute(
+                "DELETE FROM pending_grades WHERE student_id=?", (sid,))
+            conn.commit()
+
+            txt = "📢 نمرات جدید شما ثبت شد:\n"
+            for c, s in grades:
+                txt += f"{c}: {s}\n"
+            bot.send_message(tid, txt)
+
+            done.append(sid)
+        else:
+            still.append(sid)
+
+    bot.send_message(message.chat.id,
+                     f"🔄 انجام شد:\n{done}\n\n⏳ هنوز ثبت‌نام نکرده:\n{still}")
+
+# ================= DELETE =================
+
+
+def delete_student(message):
+    sid = message.text.strip()
+
+    cursor.execute("DELETE FROM students WHERE student_id=?", (sid,))
+    cursor.execute("DELETE FROM grades WHERE student_id=?", (sid,))
+    cursor.execute("DELETE FROM pending_grades WHERE student_id=?", (sid,))
+    conn.commit()
+
+    bot.send_message(message.chat.id, "✅ حذف شد")
+
+# ================= LIST =================
+
+
+def send_list(message):
+    cursor.execute("SELECT name, student_id FROM students")
+    rows = cursor.fetchall()
+
+    if not rows:
+        bot.send_message(message.chat.id, "لیستی وجود ندارد")
+        return
+
+    txt = "📋 لیست دانشجویان:\n\n"
+
+    for name, sid in rows:
+        cursor.execute(
+            "SELECT course, score FROM grades WHERE student_id=?", (sid,))
+        g = cursor.fetchall()
+        gtxt = ", ".join([f"{c}:{s}" for c, s in g]) if g else "—"
+        txt += f"{name} | {sid} | {gtxt}\n"
+
+    bot.send_message(message.chat.id, txt)
+
+# ================= WEBHOOK =================
 
 
 @app.route('/', methods=['GET'])
@@ -42,189 +377,12 @@ def home():
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    json_str = request.get_data().decode('UTF-8')
-    update = telebot.types.Update.de_json(json_str)
+    update = telebot.types.Update.de_json(request.get_data().decode('utf-8'))
     bot.process_new_updates([update])
     return "OK", 200
 
-# ================= دکمه‌ها =================
 
-
-def admin_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(KeyboardButton("📊 ثبت نمره"))
-    kb.row(KeyboardButton("🗑 حذف دانشجو"), KeyboardButton("📋 لیست دانشجوها"))
-    return kb
-
-
-def student_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(KeyboardButton("register"), KeyboardButton("score"))
-    return kb
-
-# ================= دستورات عمومی =================
-
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    telegram_id = message.from_user.id
-    if telegram_id in ALLOWED_USERS:
-        bot.send_message(
-            message.chat.id, "سلام ادمین 👋\nبه پنل مدیریتی خوش آمدید.", reply_markup=admin_keyboard())
-    else:
-        bot.send_message(
-            message.chat.id,
-            "سلام\nبه ربات نمره‌دهی ورودی بهمن 1403 پزشکی گیلان خوش آمدید.\n\n"
-            "دانشجوی گرامی جهت ثبت اطلاعات خود دکمه register را بزنید.\n"
-            "دقت کنید که نام و نام خانوادگی خود را به زبان فارسی و در مرحله بعد شماره دانشجویی را با اعداد انگلیسی وارد کنید.\n"
-            "لطفا دقت شود که هر فرد می‌تواند یک شماره دانشجویی ثبت نماید.",
-            reply_markup=student_keyboard()
-        )
-
-# ================= ثبت دانشجو =================
-
-
-@bot.message_handler(func=lambda m: m.text.lower() == "register")
-def register(message):
-    telegram_id = message.from_user.id
-    cursor.execute(
-        "SELECT * FROM students WHERE telegram_id = ?", (telegram_id,))
-    if cursor.fetchone():
-        bot.send_message(
-            message.chat.id, "❌ شما مجاز به ثبت بیش از یک شماره دانشجویی نیستید.")
-        return
-    msg = bot.send_message(
-        message.chat.id, "لطفا نام و نام خانوادگی خودت را به زبان فارسی وارد کنید:")
-    bot.register_next_step_handler(msg, get_name)
-
-
-def get_name(message):
-    name = message.text.strip()
-    msg = bot.send_message(
-        message.chat.id, "لطفا شماره دانشجویی خود را با اعداد انگلیسی وارد کنید:")
-    bot.register_next_step_handler(msg, get_student_id, name)
-
-
-def get_student_id(message, name):
-    student_id = message.text.strip()
-    telegram_id = message.from_user.id
-    cursor.execute(
-        "SELECT * FROM students WHERE student_id = ?", (student_id,))
-    if cursor.fetchone():
-        bot.send_message(message.chat.id, "❌ شماره دانشجویی تکراری است.")
-        return
-    cursor.execute("INSERT INTO students (telegram_id, name, student_id) VALUES (?, ?, ?)",
-                   (telegram_id, name, student_id))
-    conn.commit()
-    bot.send_message(
-        message.chat.id,
-        "اطلاعات شما ثبت شد.✅️\nبرای دیدن نمرات خود دکمه score را بزنید.",
-        reply_markup=student_keyboard()
-    )
-
-
-@bot.message_handler(func=lambda m: m.text.lower() == "score")
-def score(message):
-    telegram_id = message.from_user.id
-    cursor.execute(
-        "SELECT student_id FROM students WHERE telegram_id = ?", (telegram_id,))
-    res = cursor.fetchone()
-    if not res:
-        bot.send_message(message.chat.id, "❌ هنوز ثبت‌نام نکردید.")
-        return
-    student_id = res[0]
-    cursor.execute(
-        "SELECT course, score FROM grades WHERE student_id = ?", (student_id,))
-    rows = cursor.fetchall()
-    if not rows:
-        bot.send_message(message.chat.id, "❌ هنوز نمره‌ای ثبت نشده.")
-        return
-    text = "📊 نمرات شما:\n"
-    for course, score in rows:
-        text += f"{course}: {score}\n"
-    bot.send_message(message.chat.id, text)
-
-# ================= دکمه‌های ادمین =================
-
-
-@bot.message_handler(func=lambda message: message.text in ["📊 ثبت نمره", "🗑 حذف دانشجو", "📋 لیست دانشجوها"])
-def admin_actions(message):
-    if message.from_user.id not in ALLOWED_USERS:
-        bot.send_message(message.chat.id, "⛔ دسترسی غیرمجاز.")
-        return
-    if message.text == "📊 ثبت نمره":
-        msg = bot.send_message(
-            message.chat.id, "فرمت: شماره_دانشجویی درس1 نمره1 درس2 نمره2 ...\nمثال: 40123456 گوارش 19 آناتومی 18")
-        bot.register_next_step_handler(msg, set_score_handler)
-    elif message.text == "🗑 حذف دانشجو":
-        msg = bot.send_message(
-            message.chat.id, "شماره دانشجویی دانشجو برای حذف را وارد کنید:")
-        bot.register_next_step_handler(msg, delete_handler)
-    elif message.text == "📋 لیست دانشجوها":
-        send_list(message)
-
-# ================= توابع ادمین =================
-
-
-def set_score_handler(message):
-    try:
-        parts = message.text.split()
-        student_id = parts[0]
-        grades_list = parts[1:]
-        if len(grades_list) % 2 != 0:
-            bot.send_message(
-                message.chat.id, "فرمت درست:\nشماره_دانشجویی درس1 نمره1 درس2 نمره2 ...")
-            return
-        for i in range(0, len(grades_list), 2):
-            course = grades_list[i]
-            score = grades_list[i+1]
-            cursor.execute("INSERT OR REPLACE INTO grades (student_id, course, score) VALUES (?, ?, ?)",
-                           (student_id, course, score))
-        conn.commit()
-        cursor.execute(
-            "SELECT telegram_id FROM students WHERE student_id = ?", (student_id,))
-        user = cursor.fetchone()
-        if user:
-            telegram_id = user[0]
-            text = "📢 نمره جدید ثبت شد:\n"
-            for i in range(0, len(grades_list), 2):
-                text += f"{grades_list[i]}: {grades_list[i+1]}\n"
-            bot.send_message(telegram_id, text)
-        bot.send_message(
-            message.chat.id, "✅ نمرات ثبت شد و برای دانشجو ارسال شد.", reply_markup=admin_keyboard())
-    except:
-        bot.send_message(
-            message.chat.id, "فرمت درست:\nشماره_دانشجویی درس1 نمره1 درس2 نمره2 ...")
-
-
-def delete_handler(message):
-    student_id = message.text.strip()
-    cursor.execute("DELETE FROM students WHERE student_id = ?", (student_id,))
-    cursor.execute("DELETE FROM grades WHERE student_id = ?", (student_id,))
-    conn.commit()
-    bot.send_message(message.chat.id, "✅ دانشجو حذف شد.",
-                     reply_markup=admin_keyboard())
-
-
-def send_list(message):
-    cursor.execute("SELECT name, student_id FROM students")
-    students = cursor.fetchall()
-    if not students:
-        bot.send_message(message.chat.id, "لیستی وجود ندارد.",
-                         reply_markup=admin_keyboard())
-        return
-    text = "📋 لیست دانشجویان:\n\n"
-    for name, sid in students:
-        cursor.execute(
-            "SELECT course, score FROM grades WHERE student_id = ?", (sid,))
-        grades = cursor.fetchall()
-        grades_text = ", ".join(
-            [f"{c}:{s}" for c, s in grades]) if grades else "—"
-        text += f"👤 {name} | {sid} | نمرات: {grades_text}\n"
-    bot.send_message(message.chat.id, text, reply_markup=admin_keyboard())
-
-
-# ================= اجرای سرور =================
+# ================= RUN =================
 if __name__ == "__main__":
     bot.remove_webhook()
     bot.set_webhook(
